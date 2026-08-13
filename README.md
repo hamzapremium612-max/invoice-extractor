@@ -80,6 +80,18 @@ GEMINI_API_KEY = "your-key-here"
   needs Tesseract — a *system* binary, installed via `packages.txt`, not a pip
   package in `requirements.txt`.
 - It reads what is written. It does not check whether the arithmetic adds up.
-- Line items are ignored. Only the four header fields are extracted.
-- Multi-invoice PDFs are treated as one document.
-- Capped at 5 files per run to protect a free-tier quota.
+- Line items are ignored. Only the header fields are extracted.
+- Only the first 6,000 characters of any one document are sent.
+- Capped at 5 files and 12 invoices per run, to protect a free-tier quota.
+
+## Two decisions worth explaining
+
+**A PDF holding several invoices is a question, not a detection problem.**
+Three one-page invoices and one three-page invoice are *identical* to the
+code. So the app does not guess — there is a checkbox, and the person holding
+the document answers it. Guessing here would turn a visible question into an
+invisible wrong answer.
+
+**Everything uploaded is sent to a third-party AI service to be read.** That
+is stated on the page, because a demo that quietly forwards documents to
+someone else's server is not being honest with whoever is using it.

@@ -36,11 +36,19 @@ if not gemini_key:
         '  On Streamlit Cloud: Settings -> Secrets ->  GEMINI_API_KEY = "your-key"'
     )
 
+# Log to the CONSOLE, not to a file.
+# A file inside a server container is unreadable - the host's log panel only
+# shows what a program prints. Writing the diagnosis somewhere nobody can open
+# is the same as not writing it at all.
 logging.basicConfig(
-    filename="extractor.log",
     level=logging.INFO,
     format="%(asctime)s  %(levelname)s  %(message)s",
 )
+
+# The HTTP libraries log every single request at INFO. That buries our own
+# messages in noise exactly when we need to read them.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
 
 ai = OpenAI(
     base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
@@ -111,6 +119,8 @@ def extract_invoice(document):
             "which this version does not do."
         )
 
+    last_error = None                       # remember WHY, not just THAT
+
     for attempt in range(1, 4):
         try:
             reply = ai.chat.completions.create(
@@ -129,44 +139,82 @@ def extract_invoice(document):
             return {field: data.get(field) for field in FIELDS}
 
         except Exception as error:
-            logging.warning("attempt " + str(attempt) + " failed: " + str(error))
+            last_error = error
+            logging.warning(
+                "attempt " + str(attempt) + " failed: "
+                + type(error).__name__ + ": " + str(error)
+            )
             if is_quota_error(error):
                 logging.error("quota exhausted - not retrying")
                 raise RuntimeError("Daily free-tier quota reached. Try again tomorrow.")
-            if isinstance(error, ValueError):
-                raise                                   # a bad file, not a blip
             time.sleep(attempt * 3)                     # 3s, 6s, 9s
 
-    logging.error("gave up after 3 attempts")
-    raise RuntimeError("The AI service did not respond after 3 attempts.")
+    # Carry the real reason up to the surface. "It failed" is not a diagnosis.
+    logging.error("gave up after 3 attempts: " + str(last_error))
+    raise RuntimeError(
+        "Failed after 3 attempts. Last error was "
+        + type(last_error).__name__ + ": " + str(last_error)
+    )
 
 
-# --- One file, start to finish. Never raises. ---
-# Returns (row, error). Exactly one of them is None, so the caller always
-# knows which happened without inspecting the row.
-def process_one(source, filename):
-    try:
-        text = read_document(source, filename)
-        row = extract_invoice(text)
-        row["source_file"] = filename
-        return row, None
-    except Exception as error:
-        logging.warning("failed on " + filename + ": " + str(error))
-        return None, str(error)
+# --- One PDF that holds SEVERAL separate invoices, one per page ---
+# Note this is a CHOICE the caller makes, not something we detect. A 3-page
+# single invoice and 3 one-page invoices look identical to the code. Only the
+# person holding the document knows which it is, so we let them say.
+def split_pdf_pages(source, filename):
+    reader = PdfReader(source)
+    jobs = []
+    for number, page in enumerate(reader.pages, start=1):
+        text = page.extract_text() or ""
+        jobs.append((text, filename + " (page " + str(number) + ")"))
+    return jobs
 
 
-# --- Many files. One bad file must never cost us the good ones. ---
-# Project 4's rule, applied again: the batch always finishes.
-def process_many(files):
-    rows = []
+# --- Turn uploaded files into a list of (text, label) to work through ---
+# Reading can fail on its own (a scan, a corrupt file), and that failure must
+# be contained here rather than killing the whole batch.
+def prepare_jobs(files, split_pages=False):
+    jobs = []
     failures = []
 
     for source, filename in files:
-        row, error = process_one(source, filename)
+        try:
+            if split_pages and filename.lower().endswith(".pdf"):
+                jobs.extend(split_pdf_pages(source, filename))
+            else:
+                jobs.append((read_document(source, filename), filename))
+        except Exception as error:
+            logging.warning("could not read " + filename + ": " + str(error))
+            failures.append({"source_file": filename, "error": str(error)})
+
+    return jobs, failures
+
+
+# --- One piece of text, start to finish. Never raises. ---
+# Returns (row, error). Exactly one of them is None, so the caller always
+# knows which happened without inspecting the row.
+def process_one(text, label):
+    try:
+        row = extract_invoice(text)
+        row["source_file"] = label
+        return row, None
+    except Exception as error:
+        logging.warning("failed on " + label + ": " + str(error))
+        return None, str(error)
+
+
+# --- Many. One bad item must never cost us the good ones. ---
+# Project 4's rule, applied again: the batch always finishes.
+def process_many(jobs):
+    rows = []
+    failures = []
+
+    for text, label in jobs:
+        row, error = process_one(text, label)
         if row:
             rows.append(row)
         else:
-            failures.append({"source_file": filename, "error": error})
+            failures.append({"source_file": label, "error": error})
 
     return rows, failures
 
@@ -194,7 +242,9 @@ if __name__ == "__main__":
     print("Found", len(filenames), "files in", folder)
 
     files = [(os.path.join(folder, name), name) for name in filenames]
-    rows, failures = process_many(files)
+    jobs, read_failures = prepare_jobs(files)
+    rows, failures = process_many(jobs)
+    failures = read_failures + failures
 
     for row in rows:
         print("  OK  ", row["source_file"], "->", row["vendor"], row["total"])

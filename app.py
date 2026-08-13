@@ -3,16 +3,24 @@ import streamlit as st
 
 # Borrow the engine. extractor.py guards its terminal batch with
 # "if __name__ == '__main__'", so importing it does NOT run a batch.
-from extractor import process_many, rows_to_csv, COLUMNS
+from extractor import prepare_jobs, process_many, rows_to_csv, COLUMNS
 
 st.set_page_config(page_title="Invoice Extractor", page_icon="🧾")
 
 st.title("🧾 Invoice Extractor")
 st.caption("Drop in invoices. Get back a spreadsheet.")
 
-# Uploading costs an AI call per file, paid by whoever owns the key.
+# Each item costs an AI call, paid by whoever owns the key.
 # A cap is the cheapest possible Kill Switch.
 MAX_FILES = 5
+MAX_ITEMS = 12          # after page-splitting, one PDF can become many
+
+st.warning(
+    "**Anything you upload is sent to Google's AI service to be read.** "
+    "This is a public demo — use invoices you are happy to share, not real "
+    "medical, financial or client documents.",
+    icon="⚠️",
+)
 
 st.sidebar.header("How it works")
 st.sidebar.markdown(
@@ -50,6 +58,12 @@ uploaded = st.file_uploader(
     accept_multiple_files=True,
 )
 
+split_pages = st.checkbox(
+    "This PDF holds a separate invoice on every page",
+    help="The code cannot tell a 3-page invoice from 3 one-page invoices. "
+         "Only you know which it is, so you tell it.",
+)
+
 use_samples = st.checkbox("Or try it with the bundled sample invoices")
 
 # Build one list of (source, filename) pairs, whichever route the user took.
@@ -70,7 +84,17 @@ if files:
 
     if st.button("Extract " + str(len(files)) + " file(s)", type="primary"):
         with st.spinner("Reading and extracting..."):
-            rows, failures = process_many(files)
+            jobs, read_failures = prepare_jobs(files, split_pages=split_pages)
+
+            if len(jobs) > MAX_ITEMS:
+                st.warning(
+                    "That came to " + str(len(jobs)) + " invoices. Only the first "
+                    + str(MAX_ITEMS) + " will be processed."
+                )
+                jobs = jobs[:MAX_ITEMS]
+
+            rows, failures = process_many(jobs)
+            failures = read_failures + failures
 
         if rows:
             st.success("Extracted " + str(len(rows)) + " invoice(s).")
