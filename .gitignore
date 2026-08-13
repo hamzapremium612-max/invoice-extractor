@@ -1,0 +1,11 @@
+# Never let secrets leave this machine.
+.env
+.streamlit/secrets.toml
+
+# Never let real invoices leave this machine either.
+invoices/
+*.csv
+
+# Local noise - not part of the app.
+*.log
+__pycache__/

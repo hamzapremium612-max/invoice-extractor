@@ -1,0 +1,22 @@
+ACME SUPPLIES LTD.
+14 Industrial Road, Lahore
+Phone: 042-1234567
+
+                                    INVOICE
+
+Bill To:                                      Invoice #: INV-4471
+Jordan Blake                                  Date: 15 July 2026
+Riverside Office Park                         Due: 30 July 2026
+
+
+DESCRIPTION                    QTY     UNIT PRICE      AMOUNT
+-------------------------------------------------------------
+Widget A                        2        $20.00        $40.00
+Gadget B                        1        $25.00        $25.00
+Shipping                        -         -            $10.00
+-------------------------------------------------------------
+                                         Subtotal:     $75.00
+                                         Tax (5%):      $3.75
+                                         TOTAL DUE:    $78.75
+
+Payment terms: Net 15. Thank you for your business!

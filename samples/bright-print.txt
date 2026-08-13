@@ -1,0 +1,18 @@
+Bright Print Co
+office@brightprint.example
+
+Receipt No: BP-2026-0088
+Issued on: 03/08/2026
+
+Customer: Jordan Blake
+
+Items
+  Business cards (500)        $35.00
+  A3 posters x4               $48.00
+  Lamination                  $12.00
+
+                 Sub total    $95.00
+                 GST 10%       $9.50
+                 AMOUNT PAID  $104.50
+
+Paid by card. No refunds after 14 days.

@@ -1,0 +1,17 @@
+=========================================
+   NORTHWIND LOGISTICS (PVT) LTD
+   Karachi Port Terminal, Gate 4
+=========================================
+
+INVOICE NUMBER ......... NW/9921/26
+INVOICE DATE ........... 22-Jun-2026
+PAYMENT DUE ............ 22-Jul-2026
+
+SERVICE RENDERED
+  Container handling (2 x 20ft) ......... 45,000
+  Documentation fee ..................... 5,000
+  Port storage (3 days) ................. 12,000
+
+                        GRAND TOTAL      62,000 PKR
+
+Remit to: Northwind Logistics, Acct 0098-11223
