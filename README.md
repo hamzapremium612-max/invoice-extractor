@@ -6,7 +6,7 @@ date and total, pulled out of PDFs and text files and collected into one CSV.
 Built as a learning project — the point is the reliability work around the AI
 call, not the AI call itself.
 
-**Live demo:** _(add the URL here after deploying)_
+**Live demo:** https://invoice-extractor-612.streamlit.app/
 
 > The bundled samples in `samples/` are invented. No real invoices are in this
 > repository, and none ever should be.
