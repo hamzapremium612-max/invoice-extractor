@@ -77,6 +77,12 @@ Return ONLY a JSON object with exactly these fields:
 }
 If a field is missing from the document, use null. Never guess a value.
 
+SEVERAL INVOICES: if the document contains more than one separate invoice,
+return a JSON ARRAY with one object per invoice, in the order they appear.
+For a single invoice, return the object on its own. Only split where there
+are genuinely distinct invoices - a long invoice running over several pages
+is still one invoice.
+
 DATES: a numeric date like 03/08/2026 is ambiguous. Read it as DAY/MONTH/YEAR,
 not month/day/year. Always also return date_as_written so a human can check
 the conversion instead of trusting it."""
@@ -109,7 +115,37 @@ def read_document(source, filename):
         return f.read()
 
 
-# --- Extracting: text in, four fields out ---
+# --- Whatever shape came back, hand out a LIST of clean rows ---
+# A document holds SOME invoices - maybe one, maybe ten. Deciding that once,
+# here, means nothing downstream has to ask which it got. One invoice is just
+# a list of length one.
+#
+# This is the bug that broke the 10-invoice PDF: the AI correctly returned ten
+# records and the old code called .get() on them, which is a dict method.
+def to_rows(data):
+    # Sometimes it wraps the array instead of returning it bare:
+    #   {"invoices": [ {...}, {...} ]}
+    if isinstance(data, dict) and len(data) == 1:
+        key, value = list(data.items())[0]
+        if key not in FIELDS and isinstance(value, list):
+            data = value
+
+    if isinstance(data, dict):          # one invoice -> a list holding one
+        data = [data]
+
+    # Never trust the shape. Fill anything missing with None, drop anything
+    # extra, and ignore junk entries - so every row matches COLUMNS exactly.
+    rows = [
+        {field: item.get(field) for field in FIELDS}
+        for item in data if isinstance(item, dict)
+    ]
+
+    if not rows:                        # empty must be loud, not silent
+        raise ValueError("The AI returned no usable invoice records.")
+    return rows
+
+
+# --- Extracting: text in, one or more sets of fields out ---
 # Retries the way Project 4 taught: 3 attempts, growing waits, and a quota
 # error is NOT retried because a daily limit does not reset in 10 seconds.
 def extract_invoice(document):
@@ -133,10 +169,7 @@ def extract_invoice(document):
                 response_format={"type": "json_object"},
             )
             data = json.loads(reply.choices[0].message.content)
-
-            # Never trust the shape of what came back. Fill anything missing
-            # with None and drop anything extra, so every row matches COLUMNS.
-            return {field: data.get(field) for field in FIELDS}
+            return to_rows(data)
 
         except Exception as error:
             last_error = error
@@ -195,9 +228,18 @@ def prepare_jobs(files, split_pages=False):
 # knows which happened without inspecting the row.
 def process_one(text, label):
     try:
-        row = extract_invoice(text)
-        row["source_file"] = label
-        return row, None
+        rows = extract_invoice(text)
+
+        # If one document held several invoices, number them - otherwise every
+        # row would carry the same name and you could not trace one back.
+        for number, row in enumerate(rows, start=1):
+            if len(rows) > 1:
+                row["source_file"] = (label + " (" + str(number)
+                                      + " of " + str(len(rows)) + ")")
+            else:
+                row["source_file"] = label
+
+        return rows, None
     except Exception as error:
         logging.warning("failed on " + label + ": " + str(error))
         return None, str(error)
@@ -210,9 +252,9 @@ def process_many(jobs):
     failures = []
 
     for text, label in jobs:
-        row, error = process_one(text, label)
-        if row:
-            rows.append(row)
+        found, error = process_one(text, label)
+        if found:
+            rows.extend(found)          # extend, not append - could be several
         else:
             failures.append({"source_file": label, "error": error})
 
