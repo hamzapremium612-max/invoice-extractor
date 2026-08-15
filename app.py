@@ -93,8 +93,13 @@ if files:
                 )
                 jobs = jobs[:MAX_ITEMS]
 
-            rows, failures = process_many(jobs)
+            rows, failures, warnings = process_many(jobs)
             failures = read_failures + failures
+
+        # Partial reads are not failures - they produced rows. But they must
+        # be said out loud, or an invoice goes missing with no explanation.
+        for warning in warnings:
+            st.warning(warning, icon="✂️")
 
         if rows:
             st.success("Extracted " + str(len(rows)) + " invoice(s).")

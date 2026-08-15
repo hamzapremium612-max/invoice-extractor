@@ -62,9 +62,11 @@ MODEL = "gemini-3.1-flash-lite"
 FIELDS = ["vendor", "invoice_number", "date", "date_as_written", "currency", "total"]
 COLUMNS = ["source_file"] + FIELDS
 
-# A stranger can upload a 200-page PDF. Sending all of it would cost real money
-# for no gain - an invoice's useful data is always near the top.
-MAX_CHARS = 6000
+# A stranger can upload a 200-page PDF, so there has to be a ceiling.
+# 6000 was sized back when "a document" meant ONE invoice. A ten-invoice PDF
+# is ~6,300 characters, so that ceiling silently deleted the last invoice.
+# Whatever the number is, going over it must never be quiet - see process_one.
+MAX_CHARS = 20000
 
 INSTRUCTIONS = """You extract data from invoices.
 Return ONLY a JSON object with exactly these fields:
@@ -77,6 +79,13 @@ Return ONLY a JSON object with exactly these fields:
   "total": "the final total amount due, as a number without currency symbols"
 }
 If a field is missing from the document, use null. Never guess a value.
+
+INVOICE NUMBER: use only a number the document explicitly labels as an
+invoice, bill, receipt, statement or document number. NEVER use a page or
+sequence counter such as "No. 4 of 8", a contract number, an account number,
+a purchase-order number, a customer reference, or a tax registration. If the
+document has none, return null. An empty cell tells the reader to look at
+that row; a wrong number tells them it is handled.
 
 SEVERAL INVOICES: if the document contains more than one separate invoice,
 return a JSON ARRAY with one object per invoice, in the order they appear.
@@ -258,6 +267,15 @@ def prepare_jobs(files, split_pages=False):
 # Returns (row, error). Exactly one of them is None, so the caller always
 # knows which happened without inspecting the row.
 def process_one(text, label):
+    # Going over the ceiling is not an error - we still read what we can - but
+    # it must be SAID. Losing an invoice quietly is worse than failing loudly.
+    warning = None
+    if len(text) > MAX_CHARS:
+        warning = (label + ": only the first " + str(MAX_CHARS) + " of "
+                   + str(len(text)) + " characters were read. Anything after "
+                   "that was not seen. Split the file, or tick the page-split box.")
+        logging.warning(warning)
+
     try:
         rows = extract_invoice(text)
 
@@ -270,10 +288,10 @@ def process_one(text, label):
             else:
                 row["source_file"] = label
 
-        return rows, None
+        return rows, None, warning
     except Exception as error:
         logging.warning("failed on " + label + ": " + str(error))
-        return None, str(error)
+        return None, str(error), warning
 
 
 # --- Many. One bad item must never cost us the good ones. ---
@@ -281,15 +299,18 @@ def process_one(text, label):
 def process_many(jobs):
     rows = []
     failures = []
+    warnings = []                       # things that went through, but partly
 
     for text, label in jobs:
-        found, error = process_one(text, label)
+        found, error, warning = process_one(text, label)
+        if warning:
+            warnings.append(warning)
         if found:
             rows.extend(found)          # extend, not append - could be several
         else:
             failures.append({"source_file": label, "error": error})
 
-    return rows, failures
+    return rows, failures, warnings
 
 
 # --- The CSV, built in memory instead of written to disk ---
@@ -316,13 +337,15 @@ if __name__ == "__main__":
 
     files = [(os.path.join(folder, name), name) for name in filenames]
     jobs, read_failures = prepare_jobs(files)
-    rows, failures = process_many(jobs)
+    rows, failures, warnings = process_many(jobs)
     failures = read_failures + failures
 
     for row in rows:
         print("  OK  ", row["source_file"], "->", row["vendor"], row["total"])
     for fail in failures:
         print("  FAIL", fail["source_file"], "->", fail["error"])
+    for warning in warnings:
+        print("  WARN", warning)
 
     output_name = "invoices_" + str(date.today()) + ".csv"
     with open(output_name, "w", newline="", encoding="utf-8") as f:

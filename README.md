@@ -33,12 +33,16 @@ This is the part worth reading.
 | A rate limit or a network blip | 3 attempts, waits of 3s / 6s / 9s |
 | The daily quota is gone | Detected and **not** retried — retrying a daily limit just burns more of it |
 | A scanned image with no text layer | Caught early with a message that says what actually happened |
-| A 200-page upload | Only the first 6,000 characters are sent |
-| **An ambiguous date** | `03/08/2026` is read as day/month/year, **and** the original is returned as `date_as_written` so the conversion can be checked rather than trusted |
+| One document holding several invoices | The AI returns one record per invoice and all of them are kept. A single invoice is simply a list of one, so nothing downstream has to ask which it got |
+| An oversized upload | Read up to 20,000 characters — and if anything is cut, **it says so on screen**. A silently dropped invoice is worse than a refused one |
+| **An ambiguous date** | `03/08/2026` is read as day/month/year — unless the document proves otherwise, e.g. a period of `02/01 – 02/28` has no 28th month. The original is always returned as `date_as_written` |
+| **A total with no currency** | Resolved from a stated code, an unambiguous symbol, or a country signal. Where nothing identifies it, the symbol is returned as written — a cell reading `$` means *check this* |
+| **No invoice number on the document** | Left empty, rather than grabbing a page counter, contract number or account number. An empty cell says *look at this row*; a wrong one says *handled* |
 
-That last row is the one that matters most. The others crash loudly. A
-misread date produces a confident wrong answer that flows straight into a
-spreadsheet someone bills from.
+The last three matter most. The others crash loudly. These produce confident
+wrong answers that flow straight into a spreadsheet someone bills from — a
+total of `836856` next to `299250` looks bigger, until you learn one is
+rupees and the other is Canadian dollars.
 
 ## Running it locally
 
@@ -81,7 +85,8 @@ GEMINI_API_KEY = "your-key-here"
   package in `requirements.txt`.
 - It reads what is written. It does not check whether the arithmetic adds up.
 - Line items are ignored. Only the header fields are extracted.
-- Only the first 6,000 characters of any one document are sent.
+- Up to 20,000 characters per document. Past that it reads what it can and
+  warns you on screen.
 - Capped at 5 files and 12 invoices per run, to protect a free-tier quota.
 
 ## Two decisions worth explaining
