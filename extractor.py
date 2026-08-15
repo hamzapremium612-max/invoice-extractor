@@ -59,7 +59,7 @@ MODEL = "gemini-3.1-flash-lite"
 
 # The four fields we promise to return. Named once, used everywhere - so the
 # prompt, the validation and the CSV columns can never drift apart.
-FIELDS = ["vendor", "invoice_number", "date", "date_as_written", "total"]
+FIELDS = ["vendor", "invoice_number", "date", "date_as_written", "currency", "total"]
 COLUMNS = ["source_file"] + FIELDS
 
 # A stranger can upload a 200-page PDF. Sending all of it would cost real money
@@ -73,6 +73,7 @@ Return ONLY a JSON object with exactly these fields:
   "invoice_number": "the invoice number",
   "date": "the invoice date in YYYY-MM-DD format",
   "date_as_written": "the invoice date copied EXACTLY as it appears in the document",
+  "currency": "the currency of the total - see the CURRENCY rules below",
   "total": "the final total amount due, as a number without currency symbols"
 }
 If a field is missing from the document, use null. Never guess a value.
@@ -83,9 +84,39 @@ For a single invoice, return the object on its own. Only split where there
 are genuinely distinct invoices - a long invoice running over several pages
 is still one invoice.
 
-DATES: a numeric date like 03/08/2026 is ambiguous. Read it as DAY/MONTH/YEAR,
-not month/day/year. Always also return date_as_written so a human can check
-the conversion instead of trusting it."""
+CURRENCY: a total without its currency is meaningless, so work it out in
+this order and stop at the first one that applies:
+1. The document states a code - "Total (AUD)", "Payable in CAD", "Rs.", "PKR".
+   Use it.
+2. The symbol is unambiguous on its own - GBP, EUR, INR. Use it.
+3. The symbol is "$", which several countries use. Look for a country signal:
+   an address, a VAT / GST / ABN / GSTIN / NTN registration, a phone format.
+   - If that country's OWN currency is a dollar (USA, Canada, Australia,
+     New Zealand, Singapore, Hong Kong), use it: USD, CAD, AUD, NZD...
+   - If that country does NOT use dollars (Pakistan and India use rupees,
+     the UK uses pounds), then "$" cannot mean the local currency and
+     nothing says which dollar it is. Go to rule 4.
+   Never convert a symbol into a currency the document does not use. A Lahore
+   company writing "$78.75" is billing in dollars, not rupees.
+4. Nothing identifies the country. Return the symbol exactly as written, e.g.
+   "$". Do NOT assume USD.
+
+Worked example of rule 3:
+  "Nimbus Cloud, Inc., 440 Market St, San Francisco, CA 94105 ... TOTAL DUE $1,409.40"
+  -> currency is "USD". A city, state and ZIP code identify the country, so
+     the "$" IS resolved. Returning "$" here would ignore evidence that is
+     plainly on the page.
+
+Rule 4 is for genuine unknowns only - a bare "$" with no address, no tax
+registration and no country anywhere. Returning "$" then is the correct
+answer: it tells the reader to check. Guessing wrong tells them nothing is
+wrong.
+
+DATES: a numeric date like 03/08/2026 is ambiguous. Read it as DAY/MONTH/YEAR
+UNLESS the document shows otherwise - if another date on it only makes sense
+as month/day (e.g. a period of 02/01/2026 - 02/28/2026, since there is no
+28th month), follow that document's convention instead. Always also return
+date_as_written so a human can check the conversion instead of trusting it."""
 
 
 # Some failures are worth retrying (a blip). A used-up daily quota is not -
