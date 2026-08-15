@@ -121,11 +121,28 @@ registration and no country anywhere. Returning "$" then is the correct
 answer: it tells the reader to check. Guessing wrong tells them nothing is
 wrong.
 
-DATES: a numeric date like 03/08/2026 is ambiguous. Read it as DAY/MONTH/YEAR
-UNLESS the document shows otherwise - if another date on it only makes sense
-as month/day (e.g. a period of 02/01/2026 - 02/28/2026, since there is no
-28th month), follow that document's convention instead. Always also return
-date_as_written so a human can check the conversion instead of trusting it."""
+DATES: a numeric date like 03/08/2026 is ambiguous. Decide the convention
+SEPARATELY FOR EACH INVOICE, using only the dates printed on that same
+invoice. Never carry one invoice's convention over to another - a batch can
+contain a UK invoice and a US one side by side.
+
+Default to DAY/MONTH/YEAR. But if ANY other date on that same invoice only
+makes sense as month/day, then that invoice is month/day.
+
+Worked example:
+  Statement Date:
+  03/01/2026
+  Billing Period:
+  02/01/2026 - 02/28/2026
+  -> 02/28 cannot be day/month, because there is no 28th month. So THIS
+     invoice uses month/day, and 03/01/2026 is 1 March 2026, NOT 3 January.
+     date = "2026-03-01", date_as_written = "03/01/2026".
+
+Text pulled out of a PDF often puts a label on one line and its value on the
+next. A date still belongs to the label above it - read them together.
+
+Always return date_as_written so a human can check the conversion instead of
+trusting it."""
 
 
 # Some failures are worth retrying (a blip). A used-up daily quota is not -

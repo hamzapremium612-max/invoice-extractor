@@ -11,6 +11,12 @@ call, not the AI call itself.
 > The bundled samples in `samples/` are invented. No real invoices are in this
 > repository, and none ever should be.
 
+`samples/sample_invoices_10.pdf` is the interesting one: **ten invoices in a
+single PDF**, across seven currencies and five date formats — a US SaaS bill,
+a UK timber merchant, a Berlin designer, a Pakistani wholesaler, an Indian
+freight invoice, a US medical statement, a Canadian construction draw, an
+Australian receipt. Tick the samples box and it returns 14 rows from 5 files.
+
 ## How it works
 
 ```
