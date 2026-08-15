@@ -81,11 +81,27 @@ Return ONLY a JSON object with exactly these fields:
 If a field is missing from the document, use null. Never guess a value.
 
 INVOICE NUMBER: use only a number the document explicitly labels as an
-invoice, bill, receipt, statement or document number. NEVER use a page or
-sequence counter such as "No. 4 of 8", a contract number, an account number,
-a purchase-order number, a customer reference, or a tax registration. If the
-document has none, return null. An empty cell tells the reader to look at
-that row; a wrong number tells them it is handled.
+invoice, bill, receipt, statement or document number - the label must name
+the DOCUMENT, e.g. "Invoice No.", "Statement #", "Receipt No", "Order #".
+
+NEVER use: a page or sequence counter ("No. 4 of 8"), a contract number, an
+ACCOUNT number, a purchase-order number, a customer reference, or a tax
+registration. Those identify a party or an agreement, not this document.
+
+Judge each invoice ONLY on what is printed on that invoice. Never conclude
+that a number must exist because a different invoice in the batch had one.
+
+Worked example:
+  Account Statement
+  Account Number:
+  8842-771-05
+  -> "Account Number" names the CUSTOMER'S ACCOUNT, not this statement. It is
+     identical on every statement they are ever sent, so it cannot identify
+     this one. invoice_number = null.
+  Compare: "Statement #: STM-44192" DOES name the document -> use it.
+
+If the document has none, return null. An empty cell tells the reader to look
+at that row; a wrong number tells them it is handled.
 
 SEVERAL INVOICES: if the document contains more than one separate invoice,
 return a JSON ARRAY with one object per invoice, in the order they appear.
