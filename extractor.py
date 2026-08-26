@@ -1,4 +1,7 @@
 import os
+import io
+import base64
+import re
 import csv
 import io
 import json
@@ -7,6 +10,7 @@ import logging
 from dotenv import load_dotenv
 from openai import OpenAI
 from pypdf import PdfReader
+from PIL import Image
 
 load_dotenv()
 
@@ -57,9 +61,24 @@ ai = OpenAI(
 
 MODEL = "gemini-3.1-flash-lite"
 
+# A photo goes to the model AS A PICTURE. There is no OCR step and there
+# should not be: OCR flattens a page into a stream of words, and an invoice is
+# a TABLE. Once "Total" and "646,522" are separated by half a page of other
+# text, the prompt is guessing which number belongs to which label. A model
+# looking at the image just sees they are on the same row.
+IMAGE_TYPES = (".png", ".jpg", ".jpeg", ".webp")
+
+# Phone cameras produce 3-4 MB files - about 4 MB of base64 each, which is
+# slow and close to request-size limits for no benefit. Measured on three real
+# phone photos of shop receipts: shrinking the long edge to 1600px cut
+# them to 7% of their original size and every field still came back correct,
+# including two that had been photographed sideways.
+MAX_IMAGE_PX = 1600
+
 # The four fields we promise to return. Named once, used everywhere - so the
 # prompt, the validation and the CSV columns can never drift apart.
-FIELDS = ["vendor", "invoice_number", "date", "date_as_written", "currency", "total"]
+FIELDS = ["vendor", "invoice_number", "date", "date_as_written",
+          "currency", "total", "document_type"]
 COLUMNS = ["source_file"] + FIELDS
 
 # A stranger can upload a 200-page PDF, so there has to be a ceiling.
@@ -76,9 +95,24 @@ Return ONLY a JSON object with exactly these fields:
   "date": "the invoice date in YYYY-MM-DD format",
   "date_as_written": "the invoice date copied EXACTLY as it appears in the document",
   "currency": "the currency of the total - see the CURRENCY rules below",
-  "total": "the final total amount due, as a number without currency symbols"
+  "total": "the final total amount due, as a number without currency symbols",
+  "document_type": "what KIND of document this is - see DOCUMENT TYPE below"
 }
 If a field is missing from the document, use null. Never guess a value.
+
+DOCUMENT TYPE: exactly one of "invoice", "receipt", "sale_return",
+"credit_note", "quote" or "other". Read the heading of the document.
+
+This matters far more than it looks. A SALE RETURN or a CREDIT NOTE is money
+going BACK to the customer, and its total is printed exactly like an invoice
+total. Unlabelled, a month of receipts silently adds refunds as though they
+were sales - the spreadsheet looks completely normal and the books are wrong.
+A return also usually quotes the ORIGINAL invoice number, so without this
+field the two rows look like a duplicate rather than a sale and its refund.
+
+Do NOT make the total negative to signal this. Report the number exactly as
+printed and name the document type. Hiding a judgement inside a number is
+worse than stating it in a column - the same reason date_as_written exists.
 
 INVOICE NUMBER: use only a number the document explicitly labels as an
 invoice, bill, receipt, statement or document number - the label must name
@@ -181,8 +215,40 @@ class QuotaExhausted(RuntimeError):
 # touches the disk - Streamlit hands us an object that is already in memory.
 # One function serves both, because it asks what the thing CAN DO, not what
 # it is: "does it have a .read() method?"
+def to_image_payload(source):
+    """A photo, shrunk and base64-encoded, ready to hand to the model.
+
+    A job's payload is either a STRING (text we extracted) or this dict (a
+    picture we did not). Everything downstream asks which it got exactly once,
+    in extract_invoice, and nothing else has to care.
+
+    Always re-encoded as JPEG regardless of what came in, so there is one
+    format to reason about and no alpha channel to worry about.
+    """
+    image = Image.open(source)
+    image.thumbnail((MAX_IMAGE_PX, MAX_IMAGE_PX))    # only ever shrinks
+    if image.mode != "RGB":
+        image = image.convert("RGB")                 # JPEG cannot hold alpha
+    buffer = io.BytesIO()                            # never touches the disk
+    image.save(buffer, "JPEG", quality=85)
+    return {
+        "image_b64": base64.b64encode(buffer.getvalue()).decode(),
+        "mime": "image/jpeg",
+    }
+
+
+def is_image_job(payload):
+    return isinstance(payload, dict) and "image_b64" in payload
+
+
 def read_document(source, filename):
-    if filename.lower().endswith(".pdf"):
+    name = filename.lower()
+
+    # A photo is not read at all - it is passed through as a picture.
+    if name.endswith(IMAGE_TYPES):
+        return to_image_payload(source)
+
+    if name.endswith(".pdf"):
         reader = PdfReader(source)          # pypdf accepts a path OR a file object
         text = ""
         for page in reader.pages:
@@ -194,6 +260,51 @@ def read_document(source, filename):
 
     with open(source, encoding="utf-8") as f:           # a path on disk
         return f.read()
+
+
+# --- The prompt asked for a number. Sometimes it is a string. ---
+# On three real phone photos, two totals came back as floats and the third as
+# the STRING "1,159.00". A prompt REQUESTS a number; only code ENFORCES one.
+# And this failure is the quiet kind - a text value sits in a spreadsheet
+# column looking completely normal and simply refuses to add up.
+def to_number(value):
+    if value is None or isinstance(value, (int, float)):
+        return value
+
+    # Keep digits and separators only, so "Rs. 1,159.00" and "PKR 1 159,00"
+    # both survive this step.
+    text = re.sub(r"[^0-9.,\-]", "", str(value))
+
+    # "Rs. 7,071.00" leaves a leading dot behind, and ".7,071.00" parses as
+    # nothing at all. Trim separators off both ends before deciding which one
+    # is the decimal point.
+    text = text.strip(".,")
+    if not text:
+        return None
+
+    # WHICH MARK IS THE DECIMAL POINT? Whichever comes last. "1,159.00" is a
+    # thousands separator then a decimal; "1.159,00" is the European reverse.
+    # Guessing wrong here is a silent factor-of-1000 error, not a crash, so it
+    # is worth the four lines. Same instinct as date_as_written: the ambiguity
+    # is real and pretending otherwise is how a wrong number looks right.
+    last_dot = text.rfind(".")
+    last_comma = text.rfind(",")
+
+    if last_dot > last_comma:
+        text = text.replace(",", "")                      # 1,159.00
+    elif last_comma > last_dot:
+        digits_after = len(text) - last_comma - 1
+        if digits_after == 3 and last_dot == -1:
+            text = text.replace(",", "")                   # 1,159  (thousands)
+        else:
+            text = text.replace(".", "").replace(",", ".")  # 1.159,00
+    else:
+        text = text.replace(",", "")
+
+    try:
+        return float(text)
+    except ValueError:
+        return None
 
 
 # --- Whatever shape came back, hand out a LIST of clean rows ---
@@ -221,6 +332,11 @@ def to_rows(data):
         for item in data if isinstance(item, dict)
     ]
 
+    # One place where every row passes, so the total can only be a number or
+    # None - never sometimes-a-string depending on which run you got.
+    for row in rows:
+        row["total"] = to_number(row["total"])
+
     if not rows:                        # empty must be loud, not silent
         raise ValueError("The AI returned no usable invoice records.")
     return rows
@@ -230,11 +346,24 @@ def to_rows(data):
 # Retries the way Project 4 taught: 3 attempts, growing waits, and a quota
 # error is NOT retried because a daily limit does not reset in 10 seconds.
 def extract_invoice(document):
-    if not document.strip():
+    # Exactly one question, asked once: is this a picture or some text?
+    picture = is_image_job(document)
+
+    if not picture and not document.strip():
         raise ValueError(
-            "No readable text in this file. Scanned images need OCR, "
-            "which this version does not do."
+            "No readable text in this file. If it is a scan, upload it as a "
+            "photo instead (.jpg or .png) - those are read as pictures."
         )
+
+    if picture:
+        body = [
+            {"type": "text", "text": "Extract the fields from this invoice image."},
+            {"type": "image_url", "image_url": {
+                "url": "data:" + document["mime"] + ";base64," + document["image_b64"]
+            }},
+        ]
+    else:
+        body = document[:MAX_CHARS]
 
     last_error = None                       # remember WHY, not just THAT
 
@@ -244,7 +373,7 @@ def extract_invoice(document):
                 model=MODEL,
                 messages=[
                     {"role": "system", "content": INSTRUCTIONS},
-                    {"role": "user", "content": document[:MAX_CHARS]},
+                    {"role": "user", "content": body},
                 ],
                 temperature=0,                          # extraction, not writing
                 response_format={"type": "json_object"},
@@ -311,7 +440,7 @@ def process_one(text, label):
     # Going over the ceiling is not an error - we still read what we can - but
     # it must be SAID. Losing an invoice quietly is worse than failing loudly.
     warning = None
-    if len(text) > MAX_CHARS:
+    if not is_image_job(text) and len(text) > MAX_CHARS:
         warning = (label + ": only the first " + str(MAX_CHARS) + " of "
                    + str(len(text)) + " characters were read. Anything after "
                    "that was not seen. Split the file, or tick the page-split box.")

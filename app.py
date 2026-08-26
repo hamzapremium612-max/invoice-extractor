@@ -17,6 +17,13 @@ REPO = "https://github.com/hamzapremium612-max/invoice-extractor"
 MAX_FILES = 5
 MAX_ITEMS = 12          # after page-splitting, one PDF can become many
 
+# Photos get their own, lower ceiling. Not because they cost more quota - a
+# request is a request - but because each one takes 6-12 seconds against about
+# 2 for text. Twelve photos is a two-minute spinner, and a stranger trying a
+# demo does not wait two minutes; they assume it has hung and close the tab.
+MAX_IMAGES = 3
+IMAGE_TYPES = (".png", ".jpg", ".jpeg", ".webp")
+
 st.warning(
     "**Anything you upload is sent to Google's AI service to be read.** "
     "This is a public demo — use invoices you are happy to share, not real "
@@ -44,10 +51,17 @@ asked to be trusted.
 st.sidebar.header("Known limits")
 st.sidebar.markdown(
     """
-- **No OCR.** A scanned image has no text layer, so there is nothing to read.
-  Real OCR needs Tesseract, a system binary — not a pip package.
+- **Photos are read as pictures, not by OCR.** OCR flattens a page into a
+  stream of words, and an invoice is a *table* — once "Total" and its number
+  are separated, you are guessing which belongs to which. The model sees the
+  layout. Tested on real phone photos, two of them sideways.
+- **A scanned PDF still fails.** It has no text layer and is not yet
+  rasterised. Photograph it instead, or export the page as an image.
 - Numeric dates are read as **day/month/year**. Check `date_as_written`
   if the source used the American convention.
+- **`document_type` matters.** A *sale return* or *credit note* is money going
+  back to the customer, and its total looks exactly like an invoice total.
+  It is named in its own column rather than silently negated.
 - Only the first 6,000 characters of a document are sent.
 - Max 5 files per run, to protect the daily quota.
 - It reads what is written. It does not check the arithmetic.
@@ -55,9 +69,11 @@ st.sidebar.markdown(
 )
 
 uploaded = st.file_uploader(
-    "Upload invoices (PDF or .txt)",
-    type=["pdf", "txt"],
+    "Upload invoices — PDF, .txt, or a photo",
+    type=["pdf", "txt", "png", "jpg", "jpeg", "webp"],
     accept_multiple_files=True,
+    help="A photo of a paper invoice works. Hold the phone reasonably still; "
+         "sideways is fine.",
 )
 
 split_pages = st.checkbox(
@@ -83,6 +99,29 @@ if files:
     if len(files) > MAX_FILES:
         st.warning("Only the first " + str(MAX_FILES) + " files will be processed.")
         files = files[:MAX_FILES]
+
+    # Photos are capped separately, and the extras are DROPPED rather than
+    # silently ignored - a file that vanishes without a word is how someone
+    # ends up thinking an invoice was processed when it never was.
+    kept = []
+    photos = 0
+    skipped = 0
+    for item in files:
+        if item[1].lower().endswith(IMAGE_TYPES):
+            photos = photos + 1
+            if photos > MAX_IMAGES:
+                skipped = skipped + 1
+                continue
+        kept.append(item)
+
+    if skipped:
+        st.warning(
+            "Photos take several seconds each, so only the first "
+            + str(MAX_IMAGES) + " are processed. " + str(skipped)
+            + " photo(s) were not read.",
+            icon="📷",
+        )
+    files = kept
 
     if st.button("Extract " + str(len(files)) + " file(s)", type="primary"):
         with st.spinner("Reading and extracting..."):
