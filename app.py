@@ -10,6 +10,8 @@ st.set_page_config(page_title="Invoice Extractor", page_icon="🧾")
 st.title("🧾 Invoice Extractor")
 st.caption("Drop in invoices. Get back a spreadsheet.")
 
+REPO = "https://github.com/hamzapremium612-max/invoice-extractor"
+
 # Each item costs an AI call, paid by whoever owns the key.
 # A cap is the cheapest possible Kill Switch.
 MAX_FILES = 5
@@ -93,13 +95,35 @@ if files:
                 )
                 jobs = jobs[:MAX_ITEMS]
 
-            rows, failures, warnings = process_many(jobs)
+            rows, failures, warnings, quota_hit = process_many(jobs)
             failures = read_failures + failures
 
         # Partial reads are not failures - they produced rows. But they must
         # be said out loud, or an invoice goes missing with no explanation.
         for warning in warnings:
             st.warning(warning, icon="✂️")
+
+        # Running out on a free tier is a NORMAL ending for a public demo, not
+        # a bug, and it must not read like one. Said plainly here rather than
+        # buried under "files that could not be read" - those files were fine,
+        # and telling a visitor his invoices failed sends him away believing
+        # his documents are the problem. They are not; the demo is busy.
+        if quota_hit:
+            partial = ""
+            if rows:
+                partial = ("The " + str(len(rows)) + " invoice(s) below came "
+                           "through before it ran out. ")
+            st.info(
+                "**This free demo has used up today's quota.**"
+                "\n\n" + partial +
+                "It runs on a free API tier with a daily cap, and enough "
+                "people have tried it today to reach it. The cap resets "
+                "tomorrow."
+                "\n\n**Nothing was wrong with your files.** If you would "
+                "rather not wait, the code is open — clone it and run it "
+                "with your own key: " + REPO,
+                icon="🔋",
+            )
 
         if rows:
             st.success("Extracted " + str(len(rows)) + " invoice(s).")

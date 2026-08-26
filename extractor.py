@@ -168,6 +168,14 @@ def is_quota_error(error):
     return "RESOURCE_EXHAUSTED" in text or "exceeded your current quota" in text
 
 
+# Its own type, so the UI can tell "the free demo is used up today" apart from
+# "this file could not be read". Those are opposite messages: one is about the
+# demo being popular, the other blames the visitor's document. Matching on the
+# error TEXT at the UI layer would work until someone rewords the string.
+class QuotaExhausted(RuntimeError):
+    pass
+
+
 # --- Reading: works for a file PATH or an UPLOADED file ---
 # On the laptop we hand this a path string. In the web app the file never
 # touches the disk - Streamlit hands us an object that is already in memory.
@@ -252,7 +260,7 @@ def extract_invoice(document):
             )
             if is_quota_error(error):
                 logging.error("quota exhausted - not retrying")
-                raise RuntimeError("Daily free-tier quota reached. Try again tomorrow.")
+                raise QuotaExhausted("Daily free-tier quota reached. Try again tomorrow.")
             time.sleep(attempt * 3)                     # 3s, 6s, 9s
 
     # Carry the real reason up to the surface. "It failed" is not a diagnosis.
@@ -322,6 +330,8 @@ def process_one(text, label):
                 row["source_file"] = label
 
         return rows, None, warning
+    except QuotaExhausted:
+        raise                    # not this file's fault - let the batch stop
     except Exception as error:
         logging.warning("failed on " + label + ": " + str(error))
         return None, str(error), warning
@@ -334,8 +344,25 @@ def process_many(jobs):
     failures = []
     warnings = []                       # things that went through, but partly
 
+    quota_hit = False               # a different kind of ending, not a failure
+
     for text, label in jobs:
-        found, error, warning = process_one(text, label)
+        try:
+            found, error, warning = process_one(text, label)
+        except QuotaExhausted:
+            # The daily allowance is gone. Every remaining job would fail the
+            # same way, so stop rather than burn more calls proving it - the
+            # same reason a quota error is never retried.
+            #
+            # And it does NOT go in failures. Failures are files we could not
+            # read, and these files were fine. Telling a visitor his invoices
+            # "could not be read" when the real answer is "the demo is busy
+            # today" sends him away thinking his documents are the problem.
+            logging.error("quota exhausted - stopped with "
+                          + str(len(rows)) + " row(s) already extracted")
+            quota_hit = True
+            break
+
         if warning:
             warnings.append(warning)
         if found:
@@ -343,7 +370,7 @@ def process_many(jobs):
         else:
             failures.append({"source_file": label, "error": error})
 
-    return rows, failures, warnings
+    return rows, failures, warnings, quota_hit
 
 
 # --- The CSV, built in memory instead of written to disk ---
@@ -370,7 +397,7 @@ if __name__ == "__main__":
 
     files = [(os.path.join(folder, name), name) for name in filenames]
     jobs, read_failures = prepare_jobs(files)
-    rows, failures, warnings = process_many(jobs)
+    rows, failures, warnings, quota_hit = process_many(jobs)
     failures = read_failures + failures
 
     for row in rows:
