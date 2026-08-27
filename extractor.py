@@ -75,6 +75,27 @@ IMAGE_TYPES = (".png", ".jpg", ".jpeg", ".webp")
 # including two that had been photographed sideways.
 MAX_IMAGE_PX = 1600
 
+# A PDF is a CONTAINER, not a text format. Inside is either characters with
+# positions (born-digital: Word, a browser, an accounting system) or one big
+# picture per page (scanned: a camera made it and someone wrapped it in a PDF).
+# Measured: a 10-page born-digital invoice gives 6,300 characters in 15 KB; a
+# one-page scan gives ZERO in 17 KB. "Looks perfect" and "has text" are
+# unrelated - a polished CamScanner PDF is as empty as a blurry phone snap.
+#
+# Below this many characters on a page, treat it as a picture instead.
+#
+# WHY IT LEANS TOWARD THE PICTURE. The costs are not symmetric. Sending a
+# picture we did not need costs a few tokens and still works. Trusting text
+# that is really a thin OCR layer costs a WRONG ANSWER THAT LOOKS RIGHT -
+# OCR flattens a table into a word stream, so "Grand Total" and its number
+# can arrive far apart and the prompt is left guessing.
+#
+# UNTESTED: no PDF carrying an OCR text layer has been run through this. Both
+# CamScanner files tested on 2026-08-27 held zero characters, so this
+# threshold has only ever been exercised at 0. If a scanner ever produces a
+# thin real text layer, this number is a guess.
+MIN_PDF_TEXT_CHARS = 100
+
 # The four fields we promise to return. Named once, used everywhere - so the
 # prompt, the validation and the CSV columns can never drift apart.
 FIELDS = ["vendor", "invoice_number", "date", "date_as_written",
@@ -215,30 +236,54 @@ class QuotaExhausted(RuntimeError):
 # touches the disk - Streamlit hands us an object that is already in memory.
 # One function serves both, because it asks what the thing CAN DO, not what
 # it is: "does it have a .read() method?"
-def to_image_payload(source):
-    """A photo, shrunk and base64-encoded, ready to hand to the model.
-
-    A job's payload is either a STRING (text we extracted) or this dict (a
-    picture we did not). Everything downstream asks which it got exactly once,
-    in extract_invoice, and nothing else has to care.
-
-    Always re-encoded as JPEG regardless of what came in, so there is one
-    format to reason about and no alpha channel to worry about.
-    """
+def shrink_to_b64(source):
+    """One picture, shrunk and base64-encoded. Never touches the disk."""
     image = Image.open(source)
     image.thumbnail((MAX_IMAGE_PX, MAX_IMAGE_PX))    # only ever shrinks
     if image.mode != "RGB":
         image = image.convert("RGB")                 # JPEG cannot hold alpha
-    buffer = io.BytesIO()                            # never touches the disk
+    buffer = io.BytesIO()
     image.save(buffer, "JPEG", quality=85)
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
+def to_image_payload(sources):
+    """A job's payload is either a STRING (text we extracted) or this dict
+    (pictures we did not). Everything downstream asks which it got exactly
+    once, in extract_invoice, and nothing else has to care.
+
+    It holds a LIST because a scanned invoice can run over several pages, and
+    three pages of one invoice must reach the model as one document. Splitting
+    them would produce three partial rows instead of one whole invoice.
+    """
+    if not isinstance(sources, (list, tuple)):
+        sources = [sources]
     return {
-        "image_b64": base64.b64encode(buffer.getvalue()).decode(),
+        "images": [shrink_to_b64(s) for s in sources],
         "mime": "image/jpeg",
     }
 
 
 def is_image_job(payload):
-    return isinstance(payload, dict) and "image_b64" in payload
+    return isinstance(payload, dict) and "images" in payload
+
+
+def page_picture(page):
+    """The largest picture embedded in a PDF page, or None.
+
+    A scanner app stores each page as exactly one full-page image, so
+    "largest" simply means "the page". pypdf can hand it over directly - no
+    rasterising library is needed for this, which is the only shape that
+    matters, because it is what every scanner app produces.
+    """
+    biggest = None
+    try:
+        for image in page.images:
+            if biggest is None or len(image.data) > len(biggest):
+                biggest = image.data
+    except Exception as error:
+        logging.warning("could not read pictures from a PDF page: " + str(error))
+    return io.BytesIO(biggest) if biggest is not None else None
 
 
 def read_document(source, filename):
@@ -250,10 +295,23 @@ def read_document(source, filename):
 
     if name.endswith(".pdf"):
         reader = PdfReader(source)          # pypdf accepts a path OR a file object
-        text = ""
-        for page in reader.pages:
-            text = text + (page.extract_text() or "")   # a scanned page returns None
-        return text
+        text = "".join((page.extract_text() or "") for page in reader.pages)
+
+        if len(text.strip()) >= MIN_PDF_TEXT_CHARS:
+            return text
+
+        # Barely any text. If the pages are pictures - which is what a scanner
+        # app always produces - hand those over instead of an empty string.
+        # All of them together, because a scan running over several pages is
+        # still ONE invoice.
+        pictures = [pic for pic in (page_picture(pg) for pg in reader.pages)
+                    if pic is not None]
+        if pictures:
+            logging.info(filename + ": no text layer, using "
+                         + str(len(pictures)) + " page picture(s)")
+            return to_image_payload(pictures)
+
+        return text        # neither text nor picture - extract_invoice says so
 
     if hasattr(source, "read"):             # an uploaded file, already in memory
         return source.read().decode("utf-8", errors="replace")
@@ -351,17 +409,22 @@ def extract_invoice(document):
 
     if not picture and not document.strip():
         raise ValueError(
-            "No readable text in this file. If it is a scan, upload it as a "
-            "photo instead (.jpg or .png) - those are read as pictures."
+            "Nothing readable in this file - no text and no picture either. "
+            "If it is a PDF, it may be corrupt or password-protected."
         )
 
     if picture:
-        body = [
-            {"type": "text", "text": "Extract the fields from this invoice image."},
-            {"type": "image_url", "image_url": {
-                "url": "data:" + document["mime"] + ";base64," + document["image_b64"]
-            }},
-        ]
+        pages = document["images"]
+        opening = "Extract the fields from this invoice image."
+        if len(pages) > 1:
+            opening = ("The following " + str(len(pages)) + " images are the "
+                       "pages of ONE document, in order. Extract one invoice "
+                       "from them together, not one per page.")
+        body = [{"type": "text", "text": opening}]
+        for page in pages:
+            body.append({"type": "image_url", "image_url": {
+                "url": "data:" + document["mime"] + ";base64," + page
+            }})
     else:
         body = document[:MAX_CHARS]
 
@@ -408,8 +471,15 @@ def split_pdf_pages(source, filename):
     reader = PdfReader(source)
     jobs = []
     for number, page in enumerate(reader.pages, start=1):
+        label = filename + " (page " + str(number) + ")"
         text = page.extract_text() or ""
-        jobs.append((text, filename + " (page " + str(number) + ")"))
+
+        if len(text.strip()) >= MIN_PDF_TEXT_CHARS:
+            jobs.append((text, label))
+            continue
+
+        picture = page_picture(page)
+        jobs.append((to_image_payload(picture) if picture else text, label))
     return jobs
 
 

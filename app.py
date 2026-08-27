@@ -3,7 +3,8 @@ import streamlit as st
 
 # Borrow the engine. extractor.py guards its terminal batch with
 # "if __name__ == '__main__'", so importing it does NOT run a batch.
-from extractor import prepare_jobs, process_many, rows_to_csv, COLUMNS
+from extractor import (prepare_jobs, process_many, rows_to_csv,
+                       is_image_job, COLUMNS)
 
 st.set_page_config(page_title="Invoice Extractor", page_icon="🧾")
 
@@ -17,12 +18,14 @@ REPO = "https://github.com/hamzapremium612-max/invoice-extractor"
 MAX_FILES = 5
 MAX_ITEMS = 12          # after page-splitting, one PDF can become many
 
-# Photos get their own, lower ceiling. Not because they cost more quota - a
+# Pictures get their own, lower ceiling. Not because they cost more quota - a
 # request is a request - but because each one takes 6-12 seconds against about
-# 2 for text. Twelve photos is a two-minute spinner, and a stranger trying a
-# demo does not wait two minutes; they assume it has hung and close the tab.
+# 2 for text. Twelve is a two-minute spinner, and a stranger trying a demo does
+# not wait two minutes; they assume it has hung and close the tab.
+#
+# "A picture" means a photo OR a scanned PDF, which is why this is applied
+# after prepare_jobs rather than by file extension.
 MAX_IMAGES = 3
-IMAGE_TYPES = (".png", ".jpg", ".jpeg", ".webp")
 
 st.warning(
     "**Anything you upload is sent to Google's AI service to be read.** "
@@ -55,8 +58,11 @@ st.sidebar.markdown(
   stream of words, and an invoice is a *table* — once "Total" and its number
   are separated, you are guessing which belongs to which. The model sees the
   layout. Tested on real phone photos, two of them sideways.
-- **A scanned PDF still fails.** It has no text layer and is not yet
-  rasterised. Photograph it instead, or export the page as an image.
+- **Scanned PDFs work too.** A PDF is a *container*: inside is either real
+  text or one big picture per page. CamScanner and friends produce the second
+  kind — beautiful to look at, zero characters inside. When a page has almost
+  no text, its picture is read instead. A multi-page scan is treated as one
+  invoice, not one per page.
 - Numeric dates are read as **day/month/year**. Check `date_as_written`
   if the source used the American convention.
 - **`document_type` matters.** A *sale return* or *credit note* is money going
@@ -69,11 +75,11 @@ st.sidebar.markdown(
 )
 
 uploaded = st.file_uploader(
-    "Upload invoices — PDF, .txt, or a photo",
+    "Upload invoices — PDF, scan, photo or .txt",
     type=["pdf", "txt", "png", "jpg", "jpeg", "webp"],
     accept_multiple_files=True,
-    help="A photo of a paper invoice works. Hold the phone reasonably still; "
-         "sideways is fine.",
+    help="A photo of a paper invoice works, and so does a CamScanner PDF. "
+         "Hold the phone reasonably still; sideways is fine.",
 )
 
 split_pages = st.checkbox(
@@ -100,32 +106,36 @@ if files:
         st.warning("Only the first " + str(MAX_FILES) + " files will be processed.")
         files = files[:MAX_FILES]
 
-    # Photos are capped separately, and the extras are DROPPED rather than
-    # silently ignored - a file that vanishes without a word is how someone
-    # ends up thinking an invoice was processed when it never was.
-    kept = []
-    photos = 0
-    skipped = 0
-    for item in files:
-        if item[1].lower().endswith(IMAGE_TYPES):
-            photos = photos + 1
-            if photos > MAX_IMAGES:
-                skipped = skipped + 1
-                continue
-        kept.append(item)
-
-    if skipped:
-        st.warning(
-            "Photos take several seconds each, so only the first "
-            + str(MAX_IMAGES) + " are processed. " + str(skipped)
-            + " photo(s) were not read.",
-            icon="📷",
-        )
-    files = kept
-
     if st.button("Extract " + str(len(files)) + " file(s)", type="primary"):
         with st.spinner("Reading and extracting..."):
             jobs, read_failures = prepare_jobs(files, split_pages=split_pages)
+
+            # Cap pictures HERE, not by file extension, because a scanned PDF
+            # is a .pdf that turns out to be a picture. Only prepare_jobs
+            # knows which is which - it had to open the file to find out.
+            #
+            # The extras are DROPPED and SAID OUT LOUD. A file that vanishes
+            # without a word is how someone ends up believing an invoice was
+            # processed when it never was.
+            kept = []
+            pictures = 0
+            skipped = 0
+            for payload, label in jobs:
+                if is_image_job(payload):
+                    pictures = pictures + 1
+                    if pictures > MAX_IMAGES:
+                        skipped = skipped + 1
+                        continue
+                kept.append((payload, label))
+            jobs = kept
+
+            if skipped:
+                st.warning(
+                    "Photos and scans take several seconds each, so only the "
+                    "first " + str(MAX_IMAGES) + " are processed. "
+                    + str(skipped) + " were not read.",
+                    icon="📷",
+                )
 
             if len(jobs) > MAX_ITEMS:
                 st.warning(
