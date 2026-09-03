@@ -68,7 +68,8 @@ st.sidebar.markdown(
 - **`document_type` matters.** A *sale return* is money going
   back to the customer, and its total looks exactly like an invoice total.
   It is named in its own column rather than silently negated.
-- Only the first 6,000 characters of a document are sent.
+- Only the first **20,000 characters** of a text document are sent. Going over
+  that is never silent — the row says so.
 - Max 5 files per run, to protect the daily quota.
 - It reads what is written. It does not check the arithmetic.
 """
