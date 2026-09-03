@@ -121,15 +121,34 @@ Return ONLY a JSON object with exactly these fields:
 }
 If a field is missing from the document, use null. Never guess a value.
 
-DOCUMENT TYPE: exactly one of "invoice", "receipt", "sale_return",
-"credit_note", "quote" or "other". Read the heading of the document.
+DOCUMENT TYPE: exactly one of these FOUR words. Nothing else.
 
-This matters far more than it looks. A SALE RETURN or a CREDIT NOTE is money
-going BACK to the customer, and its total is printed exactly like an invoice
-total. Unlabelled, a month of receipts silently adds refunds as though they
-were sales - the spreadsheet looks completely normal and the books are wrong.
-A return also usually quotes the ORIGINAL invoice number, so without this
-field the two rows look like a duplicate rather than a sale and its refund.
+  "invoice"      money coming IN. Whatever the paper calls itself -
+                 invoice, bill, receipt, cash memo, sales slip.
+  "sale_return"  money going BACK to the customer - a return, a credit
+                 note, a refund slip.
+  "quote"        a quotation or estimate. Not money yet.
+  "other"        genuinely none of the above.
+
+Read the heading of the document. The word printed at the top decides it.
+
+WHY ONLY FOUR, AND WHY "receipt" AND "credit_note" ARE GONE. An earlier
+version offered six. Two real receipts from the SAME pharmacy, in the same
+format, came back as "receipt" and "invoice" - a coin flip presented as data.
+A label the model cannot apply consistently is worse than no label, because it
+looks like information. "invoice" and "receipt" mean the same thing here, so
+they are one word now. Same for "credit_note" and "sale_return".
+
+If a real accountant ever says the invoice-versus-receipt distinction matters
+to them - tax invoices versus till receipts for input tax - add it back then,
+knowing why. Not before.
+
+This field matters far more than it looks. A SALE RETURN is money going BACK,
+and its total is printed exactly like an invoice total. Unlabelled, a month of
+receipts silently adds refunds as though they were sales - the spreadsheet
+looks completely normal and the books are wrong. A return also usually quotes
+the ORIGINAL invoice number, so without this field the two rows look like a
+duplicate rather than a sale and its refund.
 
 Do NOT make the total negative to signal this. Report the number exactly as
 printed and name the document type. Hiding a judgement inside a number is
@@ -536,6 +555,70 @@ def process_one(text, label):
         return None, str(error), warning
 
 
+# --- The question no single row can answer ---
+# Every other guard in this file looks at ONE row alone: is this total a
+# number, does this row have all its columns, is this date ambiguous. None of
+# them can see a RELATIONSHIP between two rows - and that is exactly where a
+# sale and its refund hide, because both rows are individually perfect.
+#
+# Suggested by a reader on 31 Aug 2026, the day after the extractor was posted.
+# Worth recording that it came from outside: five per-row guards had been built
+# here and nobody in the room had noticed the whole category was missing.
+#
+# THREE THINGS THAT LOOK WRONG UNTIL YOU CHECK REAL RECEIPTS:
+#
+# 1. It does NOT group by vendor. It looks like it should - two different shops
+#    can obviously both issue an invoice numbered 1001. But the two real
+#    receipts this was built from came back as "Azam Medicine Pharmacy" and
+#    "AZAM MEDICINE PLUS" - the same shop, printing a different name on its
+#    return slip. Grouping by vendor would have missed the only case that
+#    matters.
+#
+# 2. Same number with the SAME type never warns. That is the two-shops case,
+#    and it is completely normal. An alarm that fires on healthy data teaches
+#    you to ignore the alarm.
+#
+# 3. It is a WARNING, not a failure. A sale and its return both appearing is
+#    CORRECT - it is what happened in the shop. Nothing here is broken; the
+#    reader just needs to see it before adding the column up.
+def cross_row_warnings(rows):
+    by_number = {}
+    for row in rows:
+        number = row.get("invoice_number")
+        if not number:
+            continue                       # nothing to match on
+        by_number.setdefault(str(number).strip(), []).append(row)
+
+    warnings = []
+    for number, group in sorted(by_number.items()):
+        seen = {}
+        for row in group:
+            kind = row.get("document_type")
+            if kind:
+                seen.setdefault(kind, []).append(row.get("total"))
+        if len(seen) < 2:
+            continue                       # one kind only - nothing to say
+
+        parts = []
+        for kind, totals in sorted(seen.items()):
+            shown = ", ".join(str(x) for x in totals)
+            parts.append(kind + " (" + shown + ")")
+        # The advice has to match what was actually found. An invoice and a
+        # quote sharing a number is normal - the quote became the job - and
+        # telling someone to SUBTRACT a quotation is confidently wrong. Only
+        # say "subtract" when a sale_return is genuinely in the group.
+        if "sale_return" in seen:
+            advice = ("If that is a sale and its refund, the second should be "
+                      "subtracted, not added.")
+        else:
+            advice = ("Different kinds of document sharing one number. Check "
+                      "they are not the same transaction counted twice.")
+
+        warnings.append("Invoice " + number + " appears as "
+                        + " and ".join(parts) + ". " + advice)
+    return warnings
+
+
 # --- Many. One bad item must never cost us the good ones. ---
 # Project 4's rule, applied again: the batch always finishes.
 def process_many(jobs):
@@ -568,6 +651,11 @@ def process_many(jobs):
             rows.extend(found)          # extend, not append - could be several
         else:
             failures.append({"source_file": label, "error": error})
+
+    # Only now, with every row in hand, can the cross-row question be asked.
+    # Still worth running on a partial batch: a clash among the rows we DID
+    # get is real, it just cannot see the ones we never processed.
+    warnings.extend(cross_row_warnings(rows))
 
     return rows, failures, warnings, quota_hit
 

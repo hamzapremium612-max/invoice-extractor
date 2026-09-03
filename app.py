@@ -65,7 +65,7 @@ st.sidebar.markdown(
   invoice, not one per page.
 - Numeric dates are read as **day/month/year**. Check `date_as_written`
   if the source used the American convention.
-- **`document_type` matters.** A *sale return* or *credit note* is money going
+- **`document_type` matters.** A *sale return* is money going
   back to the customer, and its total looks exactly like an invoice total.
   It is named in its own column rather than silently negated.
 - Only the first 6,000 characters of a document are sent.
@@ -147,10 +147,14 @@ if files:
             rows, failures, warnings, quota_hit = process_many(jobs)
             failures = read_failures + failures
 
-        # Partial reads are not failures - they produced rows. But they must
-        # be said out loud, or an invoice goes missing with no explanation.
+        # Two different kinds land here now, and neither is a failure:
+        #   - a partial read: rows were produced, but part of a file was not seen
+        #   - a cross-row clash: every row is fine, but two of them disagree
+        # Both mean "it worked, now look at this", which is why they are
+        # warnings and not errors. The icon stays neutral because "cut" is only
+        # true of the first kind.
         for warning in warnings:
-            st.warning(warning, icon="✂️")
+            st.warning(warning, icon="⚠️")
 
         # Running out on a free tier is a NORMAL ending for a public demo, not
         # a bug, and it must not read like one. Said plainly here rather than
