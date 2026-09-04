@@ -43,9 +43,10 @@ This is the part worth reading.
 | An oversized upload | Read up to 20,000 characters — and if anything is cut, **it says so on screen**. A silently dropped invoice is worse than a refused one |
 | **An ambiguous date** | `03/08/2026` is read as day/month/year — unless the document proves otherwise, e.g. a period of `02/01 – 02/28` has no 28th month. The original is always returned as `date_as_written` |
 | **A total with no currency** | Resolved from a stated code, an unambiguous symbol, or a country signal. Where nothing identifies it, the symbol is returned as written — a cell reading `$` means *check this* |
+| **A sale return in the pile** | Its total looks exactly like an invoice total, so it is named in `document_type` **and** signed in `signed_total`. `total` stays as printed; `signed_total` is the one that is safe to `SUM`. A label tells a person something and tells a formula nothing — that was the bug, one step further down the pipeline |
 | **No invoice number on the document** | Left empty, rather than grabbing a page counter, contract number or account number. An empty cell says *look at this row*; a wrong one says *handled* |
 
-The last three matter most. The others crash loudly. These produce confident
+The last four matter most. The others crash loudly. These produce confident
 wrong answers that flow straight into a spreadsheet someone bills from — a
 total of `836856` next to `299250` looks bigger, until you learn one is
 rupees and the other is Canadian dollars.

@@ -65,9 +65,15 @@ st.sidebar.markdown(
   invoice, not one per page.
 - Numeric dates are read as **day/month/year**. Check `date_as_written`
   if the source used the American convention.
-- **`document_type` matters.** A *sale return* is money going
-  back to the customer, and its total looks exactly like an invoice total.
-  It is named in its own column rather than silently negated.
+- **Returns are named, and also signed.** A *sale return* is money going back
+  to the customer, and its total looks exactly like an invoice total. `total`
+  stays exactly as printed on the paper; **`signed_total`** is the same number
+  with its direction applied, and it is the column that is safe to `SUM`.
+  Naming it in `document_type` alone was not enough — a label tells a person
+  something and tells a formula nothing.
+- **`signed_total` is blank for quotes and anything unclassified**, so they drop
+  out of a sum. That is deliberate, and the app says so out loud when it
+  happens — a row leaving a total quietly is how money disappears.
 - Only the first **20,000 characters** of a text document are sent. Going over
   that is never silent — the row says so.
 - Max 5 files per run, to protect the daily quota.

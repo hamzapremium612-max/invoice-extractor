@@ -98,9 +98,50 @@ MIN_PDF_TEXT_CHARS = 100
 
 # The four fields we promise to return. Named once, used everywhere - so the
 # prompt, the validation and the CSV columns can never drift apart.
+# What the MODEL is asked to return. This list is the contract with the prompt.
 FIELDS = ["vendor", "invoice_number", "date", "date_as_written",
           "currency", "total", "document_type"]
-COLUMNS = ["source_file"] + FIELDS
+
+# What the CSV contains. signed_total is NOT in FIELDS because the model never
+# produces it - it is computed here from total and document_type. It sits
+# directly beside total on purpose, so the pair is impossible to miss.
+COLUMNS = ["source_file", "vendor", "invoice_number", "date", "date_as_written",
+           "currency", "total", "signed_total", "document_type"]
+
+# The direction of the money. ARITHMETIC, not judgement, which is why it is
+# computed here instead of asked of the model: given a total and a type, the
+# sign is not a matter of opinion.
+#
+# WHY THIS COLUMN EXISTS. document_type made the judgement visible to a PERSON
+# reading the table and did nothing whatsoever for a FORMULA. Someone downloads
+# the CSV, types =SUM(total), and the refund is added to the sale: 164,964
+# where 130,980 is correct. The label was sitting in the very next column,
+# silent, because SUM does not read labels.
+#
+# Raised by a reader on 3 Sep 2026, one line: "the column exists, the bug just
+# moved one step down the pipeline."
+#
+# NOT fixed by negating total itself. That would make SUM correct and bring
+# back the original sin - a judgement hidden inside a number. If a sale were
+# ever misclassified as a return, a negated total would silently subtract real
+# revenue and nothing on the page would show it. So total stays EXACTLY as
+# printed on the paper, and signed_total is the one that is safe to add up.
+# Same split as date_as_written beside date: one for a human to check against
+# the document, one for a machine to use.
+SIGN = {"invoice": 1, "sale_return": -1}
+
+
+def signed(total, kind):
+    """total with its direction applied, or None when the direction is unknown.
+
+    "quote" and "other" deliberately return None rather than 0. A blank is
+    skipped by SUM; a zero claims the document was worth nothing. Those rows
+    dropping out of a total silently is exactly the failure this column exists
+    to prevent, so process_many says so out loud.
+    """
+    if total is None or kind not in SIGN:
+        return None
+    return SIGN[kind] * total
 
 # A stranger can upload a 200-page PDF, so there has to be a ceiling.
 # 6000 was sized back when "a document" meant ONE invoice. A ten-invoice PDF
@@ -413,6 +454,7 @@ def to_rows(data):
     # None - never sometimes-a-string depending on which run you got.
     for row in rows:
         row["total"] = to_number(row["total"])
+        row["signed_total"] = signed(row["total"], row.get("document_type"))
 
     if not rows:                        # empty must be loud, not silent
         raise ValueError("The AI returned no usable invoice records.")
@@ -651,6 +693,17 @@ def process_many(jobs):
             rows.extend(found)          # extend, not append - could be several
         else:
             failures.append({"source_file": label, "error": error})
+
+    # A blank signed_total is skipped by SUM. Skipping quietly is how money
+    # disappears, so the rows it will skip get named.
+    unsigned = [r for r in rows
+                if r.get("total") is not None and r.get("signed_total") is None]
+    if unsigned:
+        warnings.append(
+            str(len(unsigned)) + " row(s) have a total but no direction - "
+            "document_type is 'quote', 'other' or missing - so signed_total is "
+            "blank and they will NOT be counted if you sum that column."
+        )
 
     # Only now, with every row in hand, can the cross-row question be asked.
     # Still worth running on a partial batch: a clash among the rows we DID
