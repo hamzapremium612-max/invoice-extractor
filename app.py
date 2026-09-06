@@ -1,10 +1,17 @@
 import os
+import pandas as pd
 import streamlit as st
 
 # Borrow the engine. extractor.py guards its terminal batch with
 # "if __name__ == '__main__'", so importing it does NOT run a batch.
 from extractor import (prepare_jobs, process_many, rows_to_csv,
-                       is_image_job, COLUMNS)
+                       is_image_job, summarise, row_flag, COLUMNS)
+
+
+def money(value):
+    """One place decides how a number is printed, so the headline figure and
+    the breakdown under it can never disagree about the same number."""
+    return "{:,.2f}".format(value)
 
 st.set_page_config(page_title="Invoice Extractor", page_icon="🧾")
 
@@ -41,6 +48,12 @@ st.sidebar.markdown(
 2. **Extract** — the AI returns the fields as JSON
 3. **Validate** — anything missing becomes empty, so every row matches
 4. **Collect** — one row per file, into a CSV
+5. **Summarise** — the total, and what was left out of it
+
+**Every run ends with a summary, including when nothing is wrong.** If it says
+*no returns found* and you know you handed it two, the reading is wrong and you
+find out immediately. A message that only appears when there is a problem makes
+silence mean two things at once.
 
 The AI is told to return *only* JSON and to never guess a missing value.
 Temperature is **0** — this is extraction, not writing, so the same invoice
@@ -73,11 +86,18 @@ st.sidebar.markdown(
   something and tells a formula nothing.
 - **`signed_total` is blank for quotes and anything unclassified**, so they drop
   out of a sum. That is deliberate, and the app says so out loud when it
-  happens — a row leaving a total quietly is how money disappears.
+  happens — a row leaving a total quietly is how money disappears. Those rows
+  are **amber** in the table; subtracted returns are **red**. Out of a hundred
+  rows you should not have to hunt for the two worth checking.
+- **Two currencies in one batch means no total at all.** Adding rupees to
+  dollars is not slightly wrong, it is meaningless, so the number is withheld
+  rather than shown with a caveat.
+- **It reads what is written. It does not check the arithmetic**, and it cannot
+  tell you a document was classified wrongly. The summary exists so that *you*
+  can, because you know what you put in.
 - Only the first **20,000 characters** of a text document are sent. Going over
   that is never silent — the row says so.
 - Max 5 files per run, to protect the daily quota.
-- It reads what is written. It does not check the arithmetic.
 """
 )
 
@@ -186,8 +206,95 @@ if files:
             )
 
         if rows:
-            st.success("Extracted " + str(len(rows)) + " invoice(s).")
-            st.dataframe(rows, column_order=COLUMNS, use_container_width=True)
+            summary = summarise(rows)
+            unit = ""
+            if len(summary["currencies"]) == 1:
+                unit = " " + summary["currencies"][0]
+
+            # ---- THE SUMMARY, and it speaks on every run ------------------
+            #
+            # A column is read by whoever thinks to read it. document_type sat
+            # beside the money doing nothing, which is what a reader on the
+            # post caught: the label helped a person and did nothing for a
+            # formula. A sentence with a number in it gets read.
+            #
+            # IT REPORTS EVEN WHEN NOTHING IS WRONG, and that is the part that
+            # is easy to leave out. Mentioning returns only when returns exist
+            # makes silence mean two things at once - "none found" and "none
+            # looked for". The person who handed over the pile KNOWS he put
+            # two returns in it, so a confident "no returns found" is loudly
+            # wrong to the one reader who can tell. Same reason world-brief's
+            # watchdog reports on a schedule instead of only on failure.
+            if summary["mixed_currency"]:
+                st.error(
+                    "**More than one currency in this batch: "
+                    + ", ".join(summary["currencies"]) + ". No total is shown**, "
+                    "because adding them would be meaningless rather than "
+                    "merely inaccurate. Filter by currency and total each one "
+                    "separately.",
+                    icon="🚫",
+                )
+            elif summary["clean"]:
+                st.success(
+                    "**Net total " + money(summary["net"]) + unit + "**"
+                    + "  \n\nAll " + str(summary["counted"])
+                    + " row(s) counted. **No sale returns found, and nothing "
+                    "was left out.**"
+                    "  \n\nIf you know some of these were returns or refunds, "
+                    "then this reading is wrong. Check before you use it.",
+                    icon="✅",
+                )
+            else:
+                lines = ["**Net total " + money(summary["net"]) + unit + "**", ""]
+                if summary["invoices"]:
+                    lines.append("- " + str(summary["invoices"])
+                                 + " invoice(s) added: **+"
+                                 + money(summary["invoice_total"]) + "**")
+                if summary["returns"]:
+                    lines.append("- " + str(summary["returns"])
+                                 + " return(s) subtracted: **"
+                                 + money(summary["return_total"])
+                                 + "** — shown in red below")
+                if summary["unknown"]:
+                    lines.append("- " + str(summary["unknown"])
+                                 + " row(s) **NOT counted**, holding "
+                                 + money(summary["unknown_value"])
+                                 + " — document type unknown, shown in amber")
+                if summary["no_total"]:
+                    lines.append("- " + str(summary["no_total"])
+                                 + " row(s) had no total at all — shown in grey")
+                lines.append("")
+                lines.append("**Check the coloured rows.** If something you "
+                             "know is a return is not red, the reading is wrong.")
+                st.warning("\n".join(lines), icon="🧮")
+
+            # ---- The table, with the rows worth checking picked out --------
+            # Out of a hundred rows the reader must know WHICH two to check by
+            # hand. Both a background AND a text colour are set, because the
+            # page renders in the viewer's theme and a pale tint under white
+            # text is unreadable.
+            frame = pd.DataFrame(rows, columns=COLUMNS)
+            flags = [row_flag(row) for row in rows]
+            paint = {
+                "unknown":    "background-color: #fff3cd; color: #664d03",
+                "subtracted": "background-color: #f8d7da; color: #58151c",
+                "no_total":   "background-color: #e2e3e5; color: #41464b",
+            }
+
+            def colour(frame_row):
+                return [paint.get(flags[frame_row.name], "")] * len(frame_row)
+
+            st.dataframe(frame.style.apply(colour, axis=1),
+                         use_container_width=True)
+
+            # Only explain colours that are actually on screen. A legend for
+            # an empty legend is noise.
+            if any(flags):
+                st.caption(
+                    "🟥 subtracted as a return  ·  "
+                    "🟨 not counted, type unknown  ·  "
+                    "⬜ no total found"
+                )
 
             st.download_button(
                 "Download CSV",

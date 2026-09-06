@@ -661,6 +661,86 @@ def cross_row_warnings(rows):
     return warnings
 
 
+def summarise(rows):
+    """Everything a reader needs in order to decide whether to trust the total.
+
+    WHY A SUMMARY AND NOT JUST A COLUMN. A column is read by whoever thinks to
+    read it. `document_type` sat beside the money doing nothing, because a
+    label tells a person something and tells a formula nothing - and a header
+    tells a hurried person nothing either. A sentence with a number in it gets
+    read.
+
+    THE ALL-CLEAR IS THE POINT, and it is the part that is easy to leave out.
+    Reporting "3 returns subtracted" only when there are returns means SILENCE
+    carries two meanings at once: nothing was found, and nothing was looked
+    for. Those must never look the same. So this reports its state every single
+    time, including "no returns, nothing excluded" - because the person who
+    handed over the pile KNOWS he put two returns in it, and a confident
+    "no returns found" is then loudly, obviously wrong.
+
+    An alarm that fires when something breaks cannot tell you about something
+    that never started. Same reason world-brief's watchdog reports on a
+    schedule instead of only on failure.
+
+    Returns numbers only. No wording, no formatting - the caller decides how to
+    say it, and the numbers stay testable.
+    """
+    counted = [r for r in rows if r.get("signed_total") is not None]
+
+    # Two different reasons a row contributes nothing, and they are NOT the
+    # same problem. A row with no total at all has nothing to give. A row with
+    # a total but no direction has money in it that is being left out, and
+    # that is the one worth naming.
+    no_total = [r for r in rows if r.get("total") is None]
+    unknown = [r for r in rows
+               if r.get("total") is not None and r.get("signed_total") is None]
+
+    returns = [r for r in rows if r.get("document_type") == "sale_return"
+               and r.get("signed_total") is not None]
+    invoices = [r for r in rows if r.get("document_type") == "invoice"
+                and r.get("signed_total") is not None]
+
+    # MIXED CURRENCIES MUST NOT PRODUCE ONE NUMBER. 836,856 beside 299,250
+    # looks bigger until you learn one is rupees and the other is dollars.
+    # Adding them is not a rounding problem, it is nonsense - so when more than
+    # one appears, there is no net total to show and the caller must say so.
+    currencies = sorted({str(r.get("currency")).strip() for r in rows
+                         if r.get("total") is not None and r.get("currency")})
+
+    return {
+        "rows": len(rows),
+        "counted": len(counted),
+        "net": sum(r["signed_total"] for r in counted) if counted else 0,
+        "invoices": len(invoices),
+        "invoice_total": sum(r["signed_total"] for r in invoices),
+        "returns": len(returns),
+        "return_total": sum(r["signed_total"] for r in returns),   # negative
+        "unknown": len(unknown),
+        # The money that is sitting OUT of the total. The number that makes
+        # "2 rows excluded" mean something.
+        "unknown_value": sum(r["total"] for r in unknown),
+        "no_total": len(no_total),
+        "currencies": currencies,
+        "mixed_currency": len(currencies) > 1,
+        "clean": not unknown and not returns and not no_total
+                 and len(currencies) <= 1 and len(rows) > 0,
+    }
+
+
+def row_flag(row):
+    """Which of the three states a row is in, for colouring it.
+
+    Out of a hundred rows a reader must know WHICH two to check by hand.
+    """
+    if row.get("total") is None:
+        return "no_total"
+    if row.get("signed_total") is None:
+        return "unknown"
+    if row.get("document_type") == "sale_return":
+        return "subtracted"
+    return ""
+
+
 # --- Many. One bad item must never cost us the good ones. ---
 # Project 4's rule, applied again: the batch always finishes.
 def process_many(jobs):
